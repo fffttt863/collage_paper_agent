@@ -430,12 +430,26 @@ export function batchDownloadGroupPapers(groupId, format = 'zip', adminInfo = {}
   if (studentIds && studentIds.length > 0) {
     queryParams.student_ids = studentIds;
   }
+  
+  console.log('batchDownloadGroupPapers参数:', { groupId, format, queryParams });
+  
   return request({
     url: '/api/v1/groups/download/batch',
     method: 'POST',
     params: queryParams,
     responseType: 'arraybuffer',
     timeout: 300000 // 5分钟超时
+  }).then(response => {
+    console.log('batchDownloadGroupPapers响应:', typeof response, response);
+    
+    // 检查响应是否为ArrayBuffer
+    if (response instanceof ArrayBuffer) {
+      return response;
+    } else {
+      // 如果响应不是ArrayBuffer，可能是JSON错误信息
+      console.error('批量下载API返回的不是二进制文件:', response);
+      throw new Error('下载失败：服务器返回错误信息');
+    }
   });
 }
 
@@ -476,6 +490,9 @@ export function getGroupPapersList(groupId, adminInfo = {}, teacherId = null) {
     teacherId != null && teacherId !== ''
       ? String(teacherId)
       : String(adminInfo.id || 1);
+  
+  console.log('getGroupPapersList参数:', { groupId, adminInfo, teacherId, tid });
+  
   return request({
     url: '/api/v1/groups/papers',
     method: 'GET',
@@ -484,6 +501,21 @@ export function getGroupPapersList(groupId, adminInfo = {}, teacherId = null) {
       group_id: String(groupId),
       current_user: currentUser
     }
+  }).then(response => {
+    console.log('getGroupPapersList响应:', response);
+    
+    // 检查响应是否包含错误信息
+    if (response && response.code && response.code !== 200) {
+      console.error('getGroupPapersList API返回错误:', response);
+      // 返回空数组而不是抛出错误，避免影响UI显示
+      return { papers: [] };
+    }
+    
+    return response;
+  }).catch(error => {
+    console.error('getGroupPapersList API调用失败:', error);
+    // 返回空数组而不是抛出错误，避免影响UI显示
+    return { papers: [] };
   });
 }
 

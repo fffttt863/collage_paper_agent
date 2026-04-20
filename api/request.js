@@ -158,9 +158,22 @@ function doRequest(options, cacheKey, retryCount = 0) {
   }
 
   return new Promise((resolve, reject) => {
+    console.log('[Request Debug]', {
+      url: finalURL,
+      method,
+      params,
+      timeout: customTimeout || config.timeout
+    });
+    
     uni.request({
       ...requestOptions,
       success(res) {
+        console.log('[Request Success]', {
+          url: finalURL,
+          status: res.statusCode,
+          dataType: typeof res.data
+        });
+        
         const status = res.statusCode;
         const body = res.data || {};
 
@@ -214,6 +227,12 @@ function doRequest(options, cacheKey, retryCount = 0) {
         }
       },
       fail(err) {
+        console.error('[Request Failed]', {
+          url: finalURL,
+          error: err.errMsg || err.message,
+          fullError: err
+        });
+        
         // 网络错误，尝试重试
         if (retryCount < MAX_RETRY_COUNT) {
           if (process.env.NODE_ENV === 'development') {

@@ -4470,91 +4470,84 @@
 				return { error: 'ambiguous', count: rows.length };
 			},
 			teacherIdFromMemberRecord(m) {
-				if (!m) return '';
-				const v = m.member_id ?? m.account_id;
+				if (!m) {
+					console.warn('teacherIdFromMemberRecord: 成员记录为空', m);
+					return '';
+				}
+				// 尝试从多个字段中获取教师ID
+				const v = m.member_id ?? m.account_id ?? m.id ?? m.user_id ?? m.teacher_id ?? m.sub;
+				console.log('teacherIdFromMemberRecord: 成员记录', m, '解析的ID', v);
 				return v != null && v !== '' ? String(v) : '';
 			},
-			/**
-			 * 批量下载：① GET /groups/?keyword ② GET /groups/{id}/members?member_type=teacher ③ GET /groups/papers
-			 */
-			async resolveBatchDownloadContextByApis() {
+			// ==================== 批量下载功能（完全重写） ====================
+			async resolveBatchDownloadContext() {
 				const keyword = (this.batchDownloadGroupName || '').trim();
 				if (!keyword) return { ok: false, reason: 'empty' };
+				
 				const adminInfo = await this.getOrCreateAdmin();
 				const currentUser = this.buildCurrentUserFromAdmin(adminInfo);
 				const { getGroupList, getGroupMembers } = await import('@/api/admin.js');
-				const listRes = await getGroupList(
-					{ page: 1, page_size: 100, keyword },
-					currentUser
-				);
-				const rawList = this.normalizeGroupListItems(listRes);
-				const picked = this.pickGroupFromKeywordList(rawList, keyword);
-				if (picked.error === 'notfound') return { ok: false, reason: 'notfound' };
-				if (picked.error === 'ambiguous') {
-					return { ok: false, reason: 'ambiguous', count: picked.count };
+				
+				const listRes = await getGroupList({ page: 1, page_size: 100, keyword }, currentUser);
+				const groups = this.normalizeGroupListItems(listRes);
+				
+				const matched = groups.filter(g => {
+					const name = (g.group_name || g.name || '').toLowerCase();
+					const code = (g.group_id || g.id || g.code || '').toLowerCase();
+					const kw = keyword.toLowerCase();
+					return name.includes(kw) || code.includes(kw);
+				});
+				
+				if (matched.length === 0) return { ok: false, reason: 'notfound' };
+				if (matched.length > 1) return { ok: false, reason: 'ambiguous', count: matched.length };
+				
+				const g = matched[0];
+				const groupId = String(g.group_id || g.id || g.code);
+				
+				const memRes = await getGroupMembers(groupId, { member_type: 'teacher' }, currentUser);
+				const members = memRes?.members || memRes?.items || memRes?.data?.members || memRes?.data?.items || [];
+				
+				let teacherId = '';
+				if (members.length > 0) {
+					const m = members[0];
+					teacherId = m.member_id ?? m.account_id ?? m.id ?? m.user_id ?? m.teacher_id ?? m.sub ?? '';
+					teacherId = teacherId != null && teacherId !== '' ? String(teacherId) : '';
 				}
-				const g = picked.group;
-				const groupId = String(g.group_id ?? g.id ?? g.code);
-				const resolvedName = (g.group_name || g.name || keyword).trim();
-				const memRes = await getGroupMembers(
-					groupId,
-					{ member_type: 'teacher' },
-					currentUser
-				);
-				const members = memRes?.members || memRes?.items || [];
-				if (!members.length) {
-					return { ok: false, reason: 'no_teacher', message: '该群暂无教师成员' };
-				}
-				const teacherId = this.teacherIdFromMemberRecord(members[0]);
-				if (!teacherId) {
-					return { ok: false, reason: 'no_teacher_id', message: '无法解析教师 ID' };
-				}
+				
 				return {
 					ok: true,
 					groupId,
 					teacherId,
-					name: resolvedName
+					name: (g.group_name || g.name || keyword).trim()
 				};
 			},
+			
 			async previewBatchDownloadByGroupName() {
 				try {
-					uni.showLoading({ title: '查询群组与论文…' });
-					const r = await this.resolveBatchDownloadContextByApis();
+					uni.showLoading({ title: '查询群组...' });
+					const r = await this.resolveBatchDownloadContext();
 					uni.hideLoading();
-					if (!r.ok && r.reason === 'empty') {
-						uni.showToast({ title: '请输入群组名称或编号', icon: 'none' });
-						this._clearBatchDownloadPreview();
-						return;
-					}
-					if (!r.ok && r.reason === 'notfound') {
-						uni.showToast({ title: '未找到匹配的群组', icon: 'none' });
-						this._clearBatchDownloadPreview();
-						return;
-					}
-					if (!r.ok && r.reason === 'ambiguous') {
-						uni.showToast({
-							title: `找到 ${r.count} 个候选群组，请输入更精确的编号或名称`,
-							icon: 'none'
-						});
-						this._clearBatchDownloadPreview();
-						return;
-					}
+					
 					if (!r.ok) {
-						uni.showToast({ title: r.message || '解析失败', icon: 'none' });
+						if (r.reason === 'empty') uni.showToast({ title: '请输入群组名称或编号', icon: 'none' });
+						else if (r.reason === 'notfound') uni.showToast({ title: '未找到匹配的群组', icon: 'none' });
+						else if (r.reason === 'ambiguous') uni.showToast({ title: `找到 ${r.count} 个群组，请输入更精确的名称`, icon: 'none' });
+						else uni.showToast({ title: r.message || '查询失败', icon: 'none' });
 						this._clearBatchDownloadPreview();
 						return;
 					}
+					
 					this.batchDownloadTeacherId = r.teacherId;
 					this.selectedGroup = { name: r.name, value: r.groupId };
 					this.selectedGroupName = r.name;
 					await this.loadGroupPapersCount();
 				} catch (e) {
 					uni.hideLoading();
-					console.error('批量下载预览失败:', e);
 					uni.showToast({ title: e?.message || '查询失败', icon: 'none' });
 					this._clearBatchDownloadPreview();
 				}
 			},
+			
 			_clearBatchDownloadPreview() {
 				this.batchDownloadTeacherId = '';
 				this.selectedGroup = null;
@@ -4562,148 +4555,99 @@
 				this.downloadCount = 0;
 				this.downloadSize = 0;
 			},
-			onStatusSelect(e) {
-				const index = e.detail.value;
-				this.selectedStatus = this.statusOptions[index].value;
-				this.selectedStatusLabel = this.statusOptions[index].label;
-			},
-			onFormatSelect(e) {
-				this.selectedFormat = this.formatOptions[e.detail.value];
-			},
-			onDownloadOptionChange(e) {
-				const values = e.detail.value;
-				this.downloadOptions.zip = values.includes('zip');
-				this.downloadOptions.includeHistory = values.includes('include_history');
-			},
+			
 			async loadGroupPapersCount() {
 				if (!this.selectedGroup) return;
 				try {
 					const adminInfo = await this.getOrCreateAdmin();
 					const { getGroupPapersList } = await import('@/api/admin.js');
-					const teacherId =
-						this.batchDownloadTeacherId != null && this.batchDownloadTeacherId !== ''
-							? this.batchDownloadTeacherId
-							: null;
+					
+					uni.showLoading({ title: '获取论文信息...' });
 					const result = await getGroupPapersList(
 						this.selectedGroup.value,
 						adminInfo,
-						teacherId
+						this.batchDownloadTeacherId || null
 					);
-					const papers = result?.papers || result?.data?.papers || [];
+					
+					const papers = result?.papers || result?.data?.papers || result?.items || result?.data?.items || [];
 					this.downloadCount = papers.length;
-					// 计算总大小：累加每篇论文的 size
-					const totalBytes = papers.reduce((sum, p) => sum + (p.size || 0), 0);
-					this.downloadSize = totalBytes;
-					console.log('论文列表:', papers, '总大小:', totalBytes);
+					this.downloadSize = papers.reduce((sum, p) => sum + (p.size || 0), 0);
+					
+					uni.hideLoading();
 				} catch (err) {
-					console.warn('获取论文数量失败:', err);
+					uni.hideLoading();
 					this.downloadCount = 0;
 					this.downloadSize = 0;
 				}
 			},
+			
 			async startDownload() {
-				let groupId;
-				let displayName;
+				let groupId, displayName, teacherId;
 				try {
-					uni.showLoading({ title: '解析群组…' });
-					const r = await this.resolveBatchDownloadContextByApis();
+					uni.showLoading({ title: '解析群组...' });
+					const r = await this.resolveBatchDownloadContext();
 					uni.hideLoading();
-					if (!r.ok && r.reason === 'empty') {
-						uni.showToast({ title: '请输入群组名称或编号', icon: 'none' });
-						return;
-					}
-					if (!r.ok && r.reason === 'notfound') {
-						uni.showToast({ title: '未找到匹配的群组', icon: 'none' });
-						return;
-					}
-					if (!r.ok && r.reason === 'ambiguous') {
-						uni.showToast({
-							title: `找到 ${r.count} 个候选群组，请缩小范围后重试`,
-							icon: 'none'
-						});
-						return;
-					}
+					
 					if (!r.ok) {
-						uni.showToast({ title: r.message || '无法获取群组或教师信息', icon: 'none' });
+						if (r.reason === 'empty') uni.showToast({ title: '请输入群组名称或编号', icon: 'none' });
+						else if (r.reason === 'notfound') uni.showToast({ title: '未找到匹配的群组', icon: 'none' });
+						else if (r.reason === 'ambiguous') uni.showToast({ title: `找到 ${r.count} 个群组，请缩小范围`, icon: 'none' });
+						else uni.showToast({ title: r.message || '解析失败', icon: 'none' });
 						return;
 					}
+					
+					groupId = r.groupId;
+					displayName = r.name;
+					teacherId = r.teacherId;
 					this.batchDownloadTeacherId = r.teacherId;
 					this.selectedGroup = { name: r.name, value: r.groupId };
 					this.selectedGroupName = r.name;
-					groupId = r.groupId;
-					displayName = r.name;
 				} catch (e) {
 					uni.hideLoading();
 					uni.showToast({ title: e?.message || '解析失败', icon: 'none' });
 					return;
 				}
-				if (!this.selectedFormat) {
-					// 文件格式已固定为 docx，无需校验
-				}
 				
 				try {
 					const adminInfo = await this.getOrCreateAdmin();
-					const { batchDownloadGroupPapers, downloadSelectedPapers } = await import('@/api/admin.js');
-					
-					const fileName = `${displayName}_论文批量下载_${new Date().toLocaleDateString()}.zip`;
-					
-					// 先弹出保存对话框（必须在用户交互上下文中）
-					let fileHandle = null;
-					if (window.showSaveFilePicker) {
-						try {
-							fileHandle = await window.showSaveFilePicker({
-								suggestedName: fileName,
-								types: [{ description: 'ZIP 文件', accept: { 'application/zip': ['.zip'] } }]
-							});
-						} catch (pickerErr) {
-							if (pickerErr.name === 'AbortError') return;
-						}
-					}
+					const { getGroupPapersList, downloadSelectedPapers } = await import('@/api/admin.js');
 					
 					uni.showLoading({ title: '获取论文列表...' });
+					const result = await getGroupPapersList(groupId, adminInfo, teacherId);
+					const papers = result?.papers || result?.data?.papers || result?.items || result?.data?.items || [];
 					
-					// 第一步：获取该群组全部论文ID列表
-					const listResult = await batchDownloadGroupPapers(groupId, 'zip', adminInfo);
-					
-					// listResult 是 JSON （包含 papers 数组）
-					let papersData = null;
-					if (listResult instanceof ArrayBuffer) {
-						// 如果返回的是 ArrayBuffer，尝试解析为 JSON
-						try {
-							const text = new TextDecoder().decode(listResult);
-							papersData = JSON.parse(text);
-						} catch (e) {
-							console.log('返回的是二进制文件，直接使用');
-							papersData = null;
-						}
-					} else {
-						papersData = listResult;
-					}
-					
-					const papers = papersData?.papers || papersData?.data?.papers || [];
 					if (papers.length === 0) {
 						uni.hideLoading();
-						uni.showToast({ title: '该群组暂无论文', icon: 'none' });
+						uni.showToast({ title: '该群组暂无论文可下载', icon: 'none' });
 						return;
 					}
 					
-					// 提取所有 paper_id，逗号拼接
 					const paperIds = papers.map(p => p.paper_id || p.id).filter(Boolean).join(',');
-					console.log('准备下载论文 paper_ids:', paperIds);
 					
-					uni.showLoading({ title: `下载中... (${papers.length}篇论文)` });
-					
-					// 第二步：调用 /download/selected 真正下载文件
+					uni.showLoading({ title: `正在下载 ${papers.length} 篇论文...` });
 					const response = await downloadSelectedPapers(paperIds, adminInfo);
 					
-					// 将 arraybuffer 转为 Blob
-					const blob = new Blob([response], { type: 'application/zip' });
-					
-					if (fileHandle) {
-						const writable = await fileHandle.createWritable();
-						await writable.write(blob);
-						await writable.close();
-					} else {
+					if (response instanceof ArrayBuffer) {
+						if (response.byteLength === 0) {
+							throw new Error('下载失败：服务器返回空文件');
+						}
+						
+						const bytes = new Uint8Array(response);
+						if (bytes[0] !== 0x50 || bytes[1] !== 0x4B) {
+							try {
+								const text = new TextDecoder().decode(response);
+								const json = JSON.parse(text);
+								throw new Error(json.message || json.detail || '下载失败：文件格式不正确');
+							} catch (e) {
+								if (e.message && !e.message.includes('Unexpected token')) {
+									throw e;
+								}
+								throw new Error('下载失败：文件格式不正确');
+							}
+						}
+						
+						const fileName = `${displayName}_论文批量下载_${new Date().toLocaleDateString()}.zip`;
+						const blob = new Blob([response], { type: 'application/zip' });
 						const downloadUrl = URL.createObjectURL(blob);
 						const link = document.createElement('a');
 						link.href = downloadUrl;
@@ -4711,14 +4655,17 @@
 						document.body.appendChild(link);
 						link.click();
 						document.body.removeChild(link);
-						URL.revokeObjectURL(downloadUrl);
+						setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+						
+						uni.hideLoading();
+						uni.showToast({ title: '下载成功', icon: 'success' });
+					} else if (response && typeof response === 'object') {
+						throw new Error(response.message || response.detail || '下载失败：服务器返回错误');
+					} else {
+						throw new Error('下载失败：响应格式不正确');
 					}
-					
-					uni.hideLoading();
-					uni.showToast({ title: '下载成功', icon: 'success' });
 				} catch (error) {
 					uni.hideLoading();
-					console.error('批量下载失败:', error);
 					uni.showToast({ title: error.message || '下载失败', icon: 'none' });
 				}
 			},
